@@ -2,20 +2,25 @@ module Main where
 
 import Prelude
 
+import Control.Alternative ((<|>))
+import Control.Monad.Error.Class (throwError)
 import Control.Monad.Gen.Trans (evalGen, shuffle)
-import Data.Array (index, insertBy, reverse, (:))
+import Control.Monad.Maybe.Trans (runMaybeT)
+import Data.Array (drop, index, insertBy, length, reverse, singleton, take, (:))
 import Data.Array.NonEmpty (fromArray, head, tail)
 import Data.Array.NonEmpty.Internal (NonEmptyArray)
 import Data.Either (Either(..))
+import Data.Enum (pred, succ)
 import Data.FoldableWithIndex (foldrWithIndex)
 import Data.Lens (_Just, (.~))
 import Data.Lens.Record (prop)
-import Data.Maybe (Maybe(..), maybe)
+import Data.Maybe (Maybe(..), fromMaybe, maybe)
+import Data.Natural (Natural, intToNat, natToInt)
 import Data.Number (infinity)
 import Data.Tuple (Tuple(..), fst)
-import Debug (trace, traceM)
+import Debug (trace)
 import Effect (Effect)
-import Effect.Aff (Aff, launchAff_)
+import Effect.Aff (Aff, error, launchAff_)
 import Effect.Class (liftEffect)
 import Effect.Console (log)
 import Fetch (fetch)
@@ -36,7 +41,7 @@ class Measure a where
 
 type DragState =
   { dragStartPos :: Pos
-  , dragOverIdx :: Int
+  , dragOverIdx :: Maybe Natural
   }
 
 -- | The model represents the state of the app
@@ -54,7 +59,10 @@ data Message
   = StartDragging
   | StopDragging
   | MouseMove Event
-  | MouseOver Int
+  | MouseOver (Maybe Natural)
+  | RestartGame
+  | GameReady Model
+  | NoOp
 
 type Card =
   { cardDescription :: String
@@ -104,11 +112,11 @@ instance Ring Pos where
   sub (Pos x1 y1) (Pos x2 y2) = Pos (sub x1 x2) (sub y1 y2)
 
 -- | Initial state of the app
-init :: NonEmptyArray Card -> Model
-init deck =
-  { modelCurrentCard: head deck
-  , modelDeck: tail deck
-  , modelCards: mempty
+initModel :: Card -> Card -> Array Card -> Model
+initModel curCard placedCard deck =
+  { modelCurrentCard: curCard
+  , modelDeck: deck
+  , modelCards: [Tuple placedCard true]
   , modelMousePos: Pos 0 0
   , modelDragState: Nothing
   , modelLives: totalLives
@@ -116,43 +124,40 @@ init deck =
 
 -- | `update` is called to handle events
 update :: Model -> Message -> Tuple Model (Array (Aff (Maybe Message)))
+update model NoOp = Tuple model []
 update model StartDragging = Tuple newModel []
   where
     newModel = model
       { modelDragState = Just 
           { dragStartPos: model.modelMousePos
-          , dragOverIdx: 0
+          , dragOverIdx: Nothing
           }
       }
 update model StopDragging = Tuple newModel []
   where
     newModel = 
       case model.modelDragState of 
-          Nothing -> model
-          Just {dragOverIdx} -> case fromArray model.modelDeck of
+          Just {dragOverIdx: Just idx} -> case fromArray model.modelDeck of
             Just nonEmptyDeck -> model
               { modelDragState = Nothing
-              , modelCards = trace (show newModelCards) $ \_ -> newModelCards
+              , modelCards = newModelCards
               , modelLives = model.modelLives - if correct then 0 else 1
               , modelCurrentCard = head nonEmptyDeck
               , modelDeck = tail nonEmptyDeck
               }
-            Nothing -> undefined
+            Nothing -> model
             where
               getCard i = fst <$> index (reverse model.modelCards) i
               prevCard = 
                 maybe 
                   (-infinity) 
                   cardUnitlessValue
-                  (getCard $ dragOverIdx - 1)
+                  (getCard $ (natToInt idx) - 1)
               nextCard = 
-                trace ("dragOverIdx: " <> show dragOverIdx) $ \_ ->
-                trace ("prev: " <> show (getCard $ dragOverIdx - 1)) $ \_ ->
-                trace ("next: " <> show (getCard dragOverIdx)) $ \_ ->
                 maybe 
                   infinity 
                   cardUnitlessValue
-                  (getCard $ dragOverIdx)
+                  (getCard $ natToInt idx)
               correct = 
                 between 
                   prevCard
@@ -169,6 +174,9 @@ update model StopDragging = Tuple newModel []
                   )
                   (Tuple newCurCard correct)
                   model.modelCards
+          _ -> model
+                 { modelDragState = Nothing
+                 }
 update model (MouseMove event) = Tuple newModel []
   where
     newModel = 
@@ -181,15 +189,19 @@ update model (MouseMove event) = Tuple newModel []
           }
         )
         (MouseEvent.fromEvent event)
-update model (MouseOver idx) = Tuple newModel []
+update model (MouseOver mbyIdx) = Tuple newModel []
   where
     newModel = model 
       # prop (Proxy :: Proxy "modelDragState") 
         <<< _Just 
         <<< prop (Proxy :: Proxy "dragOverIdx") 
-        .~ idx
+        .~ mbyIdx
+update model RestartGame = Tuple model 
+  [ pure <<< Just <<< GameReady =<< setupGame
+  ]
+update _ (GameReady model) = Tuple model []
 
-card :: Model -> Card -> Boolean -> Maybe Int -> Html Message
+card :: Model -> Card -> Boolean -> Maybe Natural -> Html Message
 card model c correct mbyIdx = 
     HE.div 
       cardOuterStyle
@@ -229,23 +241,29 @@ card model c correct mbyIdx =
     placedAttrs = 
       case mbyIdx of
         Just idx ->
-          [ HA.onMouseover (MouseOver $ idx + 1)
+          [ HA.onMouseover $ case model.modelDragState of
+              Just {dragOverIdx: Just dragIdx} 
+                | dragIdx == idx -> MouseOver $ succ idx
+                | otherwise -> MouseOver $ Just idx
+              Just {dragOverIdx: Nothing} -> MouseOver $ Just idx
+              _ -> NoOp
           , HA.style1 "background-color" $ 
               if correct
-                then "#a7c957"
-                else "#bc4749"
+                then "#b8bb26"
+                else "#cc241d"
           ]
         Nothing ->
           [ HA.onMousedown StartDragging
           , HA.style1 "cursor" "grab"
+          , HA.style1 "background-color" "#ebdbb2"
           ] <> posAttr
     cardOuterStyle = 
       case mbyIdx of
         Just idx ->
-          [ HA.onMouseover (MouseOver idx) 
+          [ HA.onMouseover (MouseOver $ Just idx) 
           ] <> case model.modelDragState of
-            Just {dragOverIdx}
-              | idx == dragOverIdx -> 
+            Just {dragOverIdx: Just dragIdx}
+              | idx == dragIdx -> 
                 [ HA.style1 "margin-top" "48pt"
                 ]
             _ -> []
@@ -261,6 +279,32 @@ renderLives n = helper n totalLives
     helper 0 t = " 🖤" <> helper 0 (t - 1)
     helper a t = " ❤️" <> helper (a - 1) (t - 1)
 
+gameOverPopup :: Model -> Maybe (Html Message)
+gameOverPopup m
+  | m.modelLives <= 0 = 
+      Just $ HE.div
+        [ HA.style1 "position" "fixed"
+        , HA.style1 "top" "30%"
+        , HA.style1 "bottom" "30%"
+        , HA.style1 "left" "0"
+        , HA.style1 "right" "0"
+        , HA.style1 "display" "flex"
+        , HA.style1 "flex-direction" "column"
+        , HA.style1 "background-color" "#928374cc"
+        ]
+        [ HE.h1 [HA.style1 "text-align" "center"] "Game over"
+        , HE.h2 [HA.style1 "text-align" "center"] $ 
+            "Score: " <> (show $ length m.modelCards)
+        , HE.button 
+            [ HA.onClick RestartGame
+            , HA.style1 "width" "25%"
+            , HA.style1 "height" "42pt"
+            , HA.style1 "margin" "0 auto"
+            ]
+            "New game"
+        ]
+  | otherwise = Nothing
+
 -- | `view` is called whenever the model is updated
 view :: Model -> Html Message
 view model = HE.main 
@@ -269,59 +313,77 @@ view model = HE.main
   , HA.style1 "bottom" "0px"
   , HA.style1 "left" "0px"
   , HA.style1 "right" "0px"
-  , HA.style1 "background-color" "#faedcd"
+  , HA.style1 "background-color" "#282828"
   , HA.onMousemove' MouseMove
   , HA.onMouseup StopDragging
-  ]
-  [ HE.h1
-      [ HA.style1 "text-align" "center" ]
-      "Orders of magnitude"
-  , HE.h2
-      [ HA.style1 "text-align" "center" 
-      , HA.style1 "user-select" "none"
-      , HA.style1 "font-size" "32pt"
+  , HA.style1 "display" "flex"
+  , HA.style1 "flex-direction" "column"
+  ] $
+  [ HE.div
+      [ HA.onMouseover $ MouseOver Nothing
       ]
-      [ HE.text $ renderLives model.modelLives ]
-  , HE.div_ [ card model model.modelCurrentCard false Nothing ]
-  , HE.hr
+      [ HE.h1
+          [ HA.style1 "text-align" "center" 
+          , HA.style1 "color" "#ebdbb2"
+          ]
+          "Orders of magnitude"
+      , HE.h2 
+          [ HA.style1 "text-align" "center" 
+          , HA.style1 "color" "#ebdbb2"
+          , HA.style1 "font-size" "16pt"
+          ]
+          [HE.text $ "Score: " <> show (length model.modelCards)]
+      , HE.h2
+          [ HA.style1 "text-align" "center" 
+          , HA.style1 "user-select" "none"
+          , HA.style1 "font-size" "32pt"
+          ]
+          [ HE.text $ renderLives model.modelLives ]
+      , HE.div_ [ card model model.modelCurrentCard false Nothing ]
+      ]
   , HE.div
       [ HA.style1 "overflow-y" "scroll"
-      , HA.style1 "height" "100%"
+      , HA.style1 "max-height" "50%"
       ] $
       foldrWithIndex 
-        (\idx (Tuple d corr) arr -> card model d corr (Just idx) : arr) 
+        (\idx (Tuple d corr) arr -> card model d corr (Just $ intToNat idx) : arr) 
         mempty
         (reverse model.modelCards)
-  ]
+  ] <> maybe [] singleton (gameOverPopup model)
 
 -- | Events that come from outside the `view`
 subscribe :: Array (Subscription Message)
 subscribe = []
 
+setupGame :: Aff Model
+setupGame = do
+  {json} <- fetch 
+    "http://localhost:8000/data/output.json"
+    { headers: { "Accept": "application/json" }}
+
+  gameDataJson <- json
+  case JSON.read gameDataJson of
+    Left err -> throwError <<< error $ "Error: " <> show err
+    Right gameData -> do
+      newSeed <- liftEffect randomSeed
+      let shuffledDeck = evalGen (shuffle gameData)
+            { newSeed
+            , size: 100
+            }
+      Tuple placedCard curCard <- 
+        case take 2 shuffledDeck of
+          [x, y] -> pure $ Tuple x y
+          _ -> throwError $ error "Not enough cards in the deck"
+      let deckNE = drop 2 shuffledDeck
+      pure $ initModel curCard placedCard deckNE
+
 -- | Mount the application on the given selector
 main :: Effect Unit
-main = launchAff_ $
-  do
-    {json} <- fetch 
-      "http://localhost:8000/data/output.json"
-      { headers: { "Accept": "application/json" }}
-
-    gameDataJson <- json
-    case JSON.read gameDataJson of
-        Left err -> liftEffect <<< log $ "Error: " <> show err
-        Right gameData -> do
-          newSeed <- liftEffect randomSeed
-          let shuffledDeck = evalGen (shuffle gameData)
-                { newSeed
-                , size: 100
-                }
-          case fromArray shuffledDeck of
-              Just shuffledDeckNE -> do
-                traceM $ show shuffledDeckNE
-                liftEffect $ FAN.mount_ (QuerySelector "body") 
-                  { init: Tuple (init shuffledDeckNE) []
-                  , view
-                  , update
-                  , subscribe
-                  }
-              Nothing -> liftEffect <<< log $ "Deck is empty!"
+main = launchAff_ $ do 
+  model <- setupGame
+  liftEffect $ FAN.mount_ (QuerySelector "body") 
+    { init: Tuple model []
+    , view
+    , update
+    , subscribe
+    }

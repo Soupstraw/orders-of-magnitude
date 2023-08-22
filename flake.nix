@@ -28,6 +28,7 @@
                      "arrays"
                      "simple-json"
                      "generate-values"
+                     "naturals"
                    ];
 
                  dir = ./.;
