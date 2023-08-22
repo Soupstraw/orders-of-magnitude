@@ -1,1 +1,2 @@
 sed -i 's/top\([:(]\|\( =\)\)/top$top\1/g' main.js
+sed -i 's/dict\.top/dict.top$top/g' main.js

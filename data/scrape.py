@@ -26,8 +26,6 @@ for elem in list_elems:
         })
     except ValueError:
         print("skipping")
-# heh
-random.shuffle(json_data)
 
 with open("output.json", 'w') as f:
     f.write(json.dumps(json_data))

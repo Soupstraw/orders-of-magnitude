@@ -194,8 +194,7 @@ card model c correct mbyIdx =
     HE.div 
       cardOuterStyle
       [ HE.div
-          ( [ HA.style1 "border" "solid"
-            , HA.style1 "border-width" "1px"
+          ( [ HA.style1 "border-width" "1px"
             , HA.style1 "border-radius" "5px"
             , HA.style1 "padding" "5px"
             , HA.style1 "margin" "5px"
