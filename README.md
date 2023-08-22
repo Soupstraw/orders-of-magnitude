@@ -4,4 +4,5 @@
 ```
 nix develop
 purs-nix bundle
+simple-http-server
 ```
