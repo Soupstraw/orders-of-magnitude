@@ -1,6 +1,7 @@
 from bs4 import BeautifulSoup
 import re
 import json
+import random
 
 content = ""
 with open("length_data.html") as f:
@@ -20,11 +21,13 @@ for elem in list_elems:
     try:
         json_data.append({
             "cardMagnitude": float(num),
-            "unit": mag,
+            "cardUnit": mag,
             "cardDescription": desc
         })
     except ValueError:
         print("skipping")
+# heh
+random.shuffle(json_data)
 
 with open("output.json", 'w') as f:
     f.write(json.dumps(json_data))

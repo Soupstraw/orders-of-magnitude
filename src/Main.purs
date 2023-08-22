@@ -2,41 +2,32 @@ module Main where
 
 import Prelude
 
-import Control.Monad.Gen.Trans (evalGen, evalGenT, shuffle)
-import Data.Array (index, insertBy, (:))
-import Data.Array as Array
-import Data.Array.NonEmpty (NonEmptyArray(..), fromArray, fromNonEmpty, head, tail)
-import Data.Array.NonEmpty.Internal (NonEmptyArray(..))
-import Data.Either (Either(..), either)
-import Data.Enum (succ)
+import Control.Monad.Gen.Trans (evalGen, shuffle)
+import Data.Array (index, insertBy, reverse, (:))
+import Data.Array.NonEmpty (fromArray, head, tail)
+import Data.Array.NonEmpty.Internal (NonEmptyArray)
+import Data.Either (Either(..))
 import Data.FoldableWithIndex (foldrWithIndex)
-import Data.FunctorWithIndex (mapWithIndex)
 import Data.Lens (_Just, (.~))
 import Data.Lens.Record (prop)
-import Data.Maybe (Maybe(..), fromJust, maybe)
-import Data.NonEmpty (NonEmpty(..))
+import Data.Maybe (Maybe(..), maybe)
 import Data.Number (infinity)
 import Data.Tuple (Tuple(..), fst)
 import Debug (trace, traceM)
 import Effect (Effect)
-import Effect.Aff (Aff, error, launchAff_, runAff_)
-import Effect.Aff.Class (liftAff)
+import Effect.Aff (Aff, launchAff_)
 import Effect.Class (liftEffect)
 import Effect.Console (log)
-import Fetch (Method(..), Referrer(..), fetch)
-import Fetch as RequestMode
+import Fetch (fetch)
 import Flame (Html, QuerySelector(..), Subscription)
 import Flame.Application.EffectList as FAN
 import Flame.Html.Attribute as HA
 import Flame.Html.Element as HE
-import Partial (crash, crashWith)
-import Random.LCG (mkSeed, randomSeed)
-import Simple.JSON (readJSON)
+import Random.LCG (randomSeed)
 import Simple.JSON as JSON
 import Type.Proxy (Proxy(..))
 import Undefined (undefined)
 import Web.Event.Event (Event)
-import Web.HTML.HTMLElement (offsetHeight)
 import Web.UIEvent.MouseEvent as MouseEvent
 
 class Measure :: forall k. k -> Constraint
@@ -68,7 +59,35 @@ data Message
 type Card =
   { cardDescription :: String
   , cardMagnitude :: Number
+  , cardUnit :: String
   }
+
+cardUnitlessValue :: Card -> Number
+cardUnitlessValue {cardMagnitude, cardUnit} = case cardUnit of
+  "qm" -> cardMagnitude * 1.0e-30
+  "rm" -> cardMagnitude * 1.0e-27
+  "ym" -> cardMagnitude * 1.0e-24
+  "zm" -> cardMagnitude * 1.0e-21
+  "am" -> cardMagnitude * 1.0e-18
+  "fm" -> cardMagnitude * 1.0e-15
+  "pm" -> cardMagnitude * 1.0e-12
+  "nm" -> cardMagnitude * 1.0e-9
+  "μm" -> cardMagnitude * 1.0e-6
+  "mm" -> cardMagnitude * 1.0e-3
+  "cm" -> cardMagnitude * 1.0e-2
+  "dm" -> cardMagnitude * 1.0e-1
+  "m"  -> cardMagnitude
+  "metres" -> cardMagnitude
+  "km" -> cardMagnitude * 1.0e3
+  "Mm" -> cardMagnitude * 1.0e6
+  "Gm" -> cardMagnitude * 1.0e9
+  "Tm" -> cardMagnitude * 1.0e12
+  "Pm" -> cardMagnitude * 1.0e15
+  "Em" -> cardMagnitude * 1.0e18
+  "Zm" -> cardMagnitude * 1.0e21
+  "Ym" -> cardMagnitude * 1.0e24
+  "Rm" -> cardMagnitude * 1.0e27
+  u    -> trace ("unknown unit: " <> u) $ \_ -> 0.0
 
 data Pos = Pos Int Int
 
@@ -89,27 +108,7 @@ init :: NonEmptyArray Card -> Model
 init deck =
   { modelCurrentCard: head deck
   , modelDeck: tail deck
-  , modelCards: 
-      ( ( Tuple 
-            { cardDescription: "width of a chloroplast"
-            , cardMagnitude: 7.5e-6
-            }
-            false
-        )
-      : ( Tuple
-            { cardDescription: "approximate diameter of 2008 TS26, a meteoroid"
-            , cardMagnitude: 8.4e-1
-            }
-            true
-        )
-      : ( Tuple
-            { cardDescription: "width of a typical association football field"
-            , cardMagnitude: 7.0e1
-            }
-            true
-        )
-      : mempty
-      )
+  , modelCards: mempty
   , modelMousePos: Pos 0 0
   , modelDragState: Nothing
   , modelLives: totalLives
@@ -130,33 +129,46 @@ update model StopDragging = Tuple newModel []
     newModel = 
       case model.modelDragState of 
           Nothing -> model
-          Just {dragOverIdx} -> model
-            { modelDragState = Nothing
-            , modelCards = 
-                insertBy 
-                  (\(Tuple {cardMagnitude: x} _) 
-                    (Tuple {cardMagnitude: y} _) -> compare x y)
-                  (Tuple newCurCard correct)
-                  model.modelCards
-            , modelLives = model.modelLives - if correct then 0 else 1
-            }
+          Just {dragOverIdx} -> case fromArray model.modelDeck of
+            Just nonEmptyDeck -> model
+              { modelDragState = Nothing
+              , modelCards = trace (show newModelCards) $ \_ -> newModelCards
+              , modelLives = model.modelLives - if correct then 0 else 1
+              , modelCurrentCard = head nonEmptyDeck
+              , modelDeck = tail nonEmptyDeck
+              }
+            Nothing -> undefined
             where
+              getCard i = fst <$> index (reverse model.modelCards) i
               prevCard = 
                 maybe 
                   (-infinity) 
-                  _.cardMagnitude 
-                  (fst <$> index model.modelCards (dragOverIdx - 1))
+                  cardUnitlessValue
+                  (getCard $ dragOverIdx - 1)
               nextCard = 
+                trace ("dragOverIdx: " <> show dragOverIdx) $ \_ ->
+                trace ("prev: " <> show (getCard $ dragOverIdx - 1)) $ \_ ->
+                trace ("next: " <> show (getCard dragOverIdx)) $ \_ ->
                 maybe 
                   infinity 
-                  _.cardMagnitude 
-                  (fst <$> index model.modelCards dragOverIdx)
+                  cardUnitlessValue
+                  (getCard $ dragOverIdx)
               correct = 
                 between 
                   prevCard
                   nextCard
-                  model.modelCurrentCard.cardMagnitude
+                  (cardUnitlessValue model.modelCurrentCard)
               newCurCard = model.modelCurrentCard
+              newModelCards = 
+                insertBy 
+                  (\(Tuple x _) 
+                    (Tuple y _) -> 
+                      (flip compare)
+                        (cardUnitlessValue x) 
+                        (cardUnitlessValue y)
+                  )
+                  (Tuple newCurCard correct)
+                  model.modelCards
 update model (MouseMove event) = Tuple newModel []
   where
     newModel = 
@@ -203,7 +215,7 @@ card model c correct mbyIdx =
       ]
   where
     magText = case mbyIdx of
-      Just _ -> show c.cardMagnitude
+      Just _ -> show c.cardMagnitude <> " " <> c.cardUnit
       Nothing -> "?"
     posAttr =  case model.modelDragState of
       Just {dragStartPos} ->
@@ -219,9 +231,10 @@ card model c correct mbyIdx =
       case mbyIdx of
         Just idx ->
           [ HA.onMouseover (MouseOver $ idx + 1)
-          , HA.style1 "background-color" $ if correct
-                                             then "#a7c957"
-                                             else "#bc4749"
+          , HA.style1 "background-color" $ 
+              if correct
+                then "#a7c957"
+                else "#bc4749"
           ]
         Nothing ->
           [ HA.onMousedown StartDragging
@@ -279,7 +292,7 @@ view model = HE.main
       foldrWithIndex 
         (\idx (Tuple d corr) arr -> card model d corr (Just idx) : arr) 
         mempty
-        model.modelCards
+        (reverse model.modelCards)
   ]
 
 -- | Events that come from outside the `view`

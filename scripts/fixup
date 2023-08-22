@@ -1,0 +1,1 @@
+sed -i 's/top\([:(]\|\( =\)\)/top$top\1/g' main.js
