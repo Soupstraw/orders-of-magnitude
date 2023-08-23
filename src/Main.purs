@@ -12,13 +12,13 @@ import Data.Array.NonEmpty.Internal (NonEmptyArray)
 import Data.Either (Either(..))
 import Data.Enum (pred, succ)
 import Data.FoldableWithIndex (foldrWithIndex)
-import Data.Lens (_Just, (.~))
+import Data.Lens (_Just, is, (.~))
 import Data.Lens.Record (prop)
 import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Natural (Natural, intToNat, natToInt)
 import Data.Number (infinity)
 import Data.Tuple (Tuple(..), fst)
-import Debug (trace)
+import Debug (trace, traceM)
 import Effect (Effect)
 import Effect.Aff (Aff, error, launchAff_)
 import Effect.Class (liftEffect)
@@ -28,11 +28,13 @@ import Flame (Html, QuerySelector(..), Subscription)
 import Flame.Application.EffectList as FAN
 import Flame.Html.Attribute as HA
 import Flame.Html.Element as HE
+import Flame.Types (NodeData)
 import Random.LCG (randomSeed)
 import Simple.JSON as JSON
 import Type.Proxy (Proxy(..))
 import Undefined (undefined)
 import Web.Event.Event (Event)
+import Web.HTML.HTMLElement (offsetHeight)
 import Web.UIEvent.MouseEvent as MouseEvent
 
 class Measure :: forall k. k -> Constraint
@@ -52,6 +54,8 @@ type Model =
   , modelMousePos :: Pos
   , modelDragState :: Maybe DragState
   , modelLives :: Int
+  , modelBestScore :: Int
+  , modelCardsOrder :: CardsOrder
   }
 
 -- | Data type used to represent events
@@ -69,6 +73,10 @@ type Card =
   , cardMagnitude :: Number
   , cardUnit :: String
   }
+
+data CardsOrder
+  = Ascending
+  | Descending
 
 cardUnitlessValue :: Card -> Number
 cardUnitlessValue {cardMagnitude, cardUnit} = case cardUnit of
@@ -95,7 +103,7 @@ cardUnitlessValue {cardMagnitude, cardUnit} = case cardUnit of
   "Zm" -> cardMagnitude * 1.0e21
   "Ym" -> cardMagnitude * 1.0e24
   "Rm" -> cardMagnitude * 1.0e27
-  u    -> trace ("unknown unit: " <> u) $ \_ -> 0.0
+  u    -> trace ("Unknown unit: " <> u) $ \_ -> 0.0
 
 data Pos = Pos Int Int
 
@@ -120,6 +128,8 @@ initModel curCard placedCard deck =
   , modelMousePos: Pos 0 0
   , modelDragState: Nothing
   , modelLives: totalLives
+  , modelBestScore: 0
+  , modelCardsOrder: Descending
   }
 
 -- | `update` is called to handle events
@@ -133,47 +143,54 @@ update model StartDragging = Tuple newModel []
           , dragOverIdx: Nothing
           }
       }
-update model StopDragging = Tuple newModel []
+update model StopDragging = 
+  Tuple newModel []
   where
     newModel = 
       case model.modelDragState of 
-          Just {dragOverIdx: Just idx} -> case fromArray model.modelDeck of
-            Just nonEmptyDeck -> model
-              { modelDragState = Nothing
-              , modelCards = newModelCards
-              , modelLives = model.modelLives - if correct then 0 else 1
-              , modelCurrentCard = head nonEmptyDeck
-              , modelDeck = tail nonEmptyDeck
-              }
-            Nothing -> model
-            where
-              getCard i = fst <$> index (reverse model.modelCards) i
-              prevCard = 
-                maybe 
-                  (-infinity) 
-                  cardUnitlessValue
-                  (getCard $ (natToInt idx) - 1)
-              nextCard = 
-                maybe 
-                  infinity 
-                  cardUnitlessValue
-                  (getCard $ natToInt idx)
-              correct = 
-                between 
-                  prevCard
-                  nextCard
-                  (cardUnitlessValue model.modelCurrentCard)
-              newCurCard = model.modelCurrentCard
-              newModelCards = 
-                insertBy 
-                  (\(Tuple x _) 
-                    (Tuple y _) -> 
-                      (flip compare)
-                        (cardUnitlessValue x) 
-                        (cardUnitlessValue y)
-                  )
-                  (Tuple newCurCard correct)
-                  model.modelCards
+          Just {dragOverIdx: Just idx'} -> 
+            case fromArray model.modelDeck of
+              Just nonEmptyDeck -> 
+                trace ("idx: " <> show idx) $ \_ ->
+                  model
+                    { modelDragState = Nothing
+                    , modelCards = newModelCards
+                    , modelLives = model.modelLives - if correct then 0 else 1
+                    , modelCurrentCard = head nonEmptyDeck
+                    , modelDeck = tail nonEmptyDeck
+                    }
+              Nothing -> model
+              where
+                idx = case model.modelCardsOrder of
+                        Ascending -> natToInt idx'
+                        Descending -> length model.modelCards - natToInt idx'
+                getCard i = fst <$> index (reverse model.modelCards) i
+                prevCard = 
+                  maybe 
+                    (-infinity) 
+                    cardUnitlessValue
+                    (getCard $ idx - 1)
+                nextCard = 
+                  maybe 
+                    infinity 
+                    cardUnitlessValue
+                    (getCard $ idx)
+                correct = 
+                  between 
+                    prevCard
+                    nextCard
+                    (cardUnitlessValue model.modelCurrentCard)
+                newCurCard = model.modelCurrentCard
+                newModelCards = 
+                  insertBy 
+                    (\(Tuple x _) 
+                      (Tuple y _) -> 
+                        (flip compare)
+                          (cardUnitlessValue x) 
+                          (cardUnitlessValue y)
+                    )
+                    (Tuple newCurCard correct)
+                    model.modelCards
           _ -> model
                  { modelDragState = Nothing
                  }
@@ -199,7 +216,14 @@ update model (MouseOver mbyIdx) = Tuple newModel []
 update model RestartGame = Tuple model 
   [ pure <<< Just <<< GameReady =<< setupGame
   ]
-update _ (GameReady model) = Tuple model []
+update oldModel (GameReady freshModel) = Tuple newModel []
+  where
+    newModel = freshModel
+      { modelBestScore = 
+          max 
+            oldModel.modelBestScore 
+            (length oldModel.modelCards)
+      }
 
 card :: Model -> Card -> Boolean -> Maybe Natural -> Html Message
 card model c correct mbyIdx = 
@@ -207,10 +231,9 @@ card model c correct mbyIdx =
       cardOuterStyle
       [ HE.div
           ( [ HA.style1 "border-width" "1px"
-            , HA.style1 "border-radius" "5px"
             , HA.style1 "padding" "5px"
             , HA.style1 "margin" "5px"
-            , HA.style1 "width" "50%"
+            , HA.style1 "width" "50vw"
             , HA.style1 "min-width" "500pt"
             , HA.style1 "user-select" "none"
             , HA.style1 "display" "table"
@@ -218,6 +241,7 @@ card model c correct mbyIdx =
             , HA.style1 "margin-right" "auto"
             , HA.style1 "box-shadow" "3px 3px 2px 1px rgba(0, 0, 128, .2)"
             , HA.style1 "background-color" "#fefae0"
+            , HA.style1 "font-size" "20pt"
             ] <> placedAttrs
           ) $
           [ HE.div_ [HE.text c.cardDescription ]
@@ -236,6 +260,7 @@ card model c correct mbyIdx =
               "transform"
               ("translate(" <> show x <> "px," <> show y <> "px)")
           , HA.style1 "pointer-events" "none"
+          , HA.style1 "background-color" "#fefae055"
           ]
       Nothing -> []
     placedAttrs = 
@@ -258,6 +283,9 @@ card model c correct mbyIdx =
           , HA.style1 "background-color" "#ebdbb2"
           ] <> posAttr
     cardOuterStyle = 
+      [ HA.style1 "width" "100%"
+      , HA.style1 "margin" "0 auto"
+      ] <>
       case mbyIdx of
         Just idx ->
           [ HA.onMouseover (MouseOver $ Just idx) 
@@ -279,31 +307,41 @@ renderLives n = helper n totalLives
     helper 0 t = " 🖤" <> helper 0 (t - 1)
     helper a t = " ❤️" <> helper (a - 1) (t - 1)
 
-gameOverPopup :: Model -> Maybe (Html Message)
-gameOverPopup m
-  | m.modelLives <= 0 = 
-      Just $ HE.div
-        [ HA.style1 "position" "fixed"
-        , HA.style1 "top" "30%"
-        , HA.style1 "bottom" "30%"
-        , HA.style1 "left" "0"
-        , HA.style1 "right" "0"
-        , HA.style1 "display" "flex"
+gameOverPopup :: Html Message
+gameOverPopup = HE.div
+        [ HA.style1 "display" "flex"
         , HA.style1 "flex-direction" "column"
         , HA.style1 "background-color" "#928374cc"
         ]
         [ HE.h1 [HA.style1 "text-align" "center"] "Game over"
-        , HE.h2 [HA.style1 "text-align" "center"] $ 
-            "Score: " <> (show $ length m.modelCards)
         , HE.button 
             [ HA.onClick RestartGame
             , HA.style1 "width" "25%"
             , HA.style1 "height" "42pt"
             , HA.style1 "margin" "0 auto"
+            , HA.style1 "padding-bottom" "10px"
             ]
             "New game"
         ]
-  | otherwise = Nothing
+
+cardCapStyle :: Array (NodeData Message)
+cardCapStyle =
+  [ HA.style1 "text-align" "center" 
+  , HA.style1 "user-select" "none"
+  , HA.style1 "color" "#ebdbb2"
+  , HA.style1 "font-size" "18pt"
+  , HA.style1 "border-width" "1px"
+  , HA.style1 "padding" "12px 5px 12px 5px"
+  , HA.style1 "margin" "0"
+  , HA.style1 "width" "50vw"
+  , HA.style1 "min-width" "500pt"
+  , HA.style1 "user-select" "none"
+  , HA.style1 "display" "table"
+  , HA.style1 "margin-left" "auto"
+  , HA.style1 "margin-right" "auto"
+  , HA.style1 "box-shadow" "3px 3px 2px 1px rgba(0, 0, 128, .2)"
+  , HA.style1 "background-color" "#928374"
+  ]
 
 -- | `view` is called whenever the model is updated
 view :: Model -> Html Message
@@ -322,34 +360,70 @@ view model = HE.main
   [ HE.div
       [ HA.onMouseover $ MouseOver Nothing
       ]
-      [ HE.h1
-          [ HA.style1 "text-align" "center" 
-          , HA.style1 "color" "#ebdbb2"
-          ]
-          "Orders of magnitude"
-      , HE.h2 
+      --[ HE.h1
+      --    [ HA.style1 "text-align" "center" 
+      --    , HA.style1 "color" "#ebdbb2"
+      --    ]
+      --    "Orders of magnitude"
+      [ HE.h2 
           [ HA.style1 "text-align" "center" 
           , HA.style1 "color" "#ebdbb2"
           , HA.style1 "font-size" "16pt"
           ]
-          [HE.text $ "Score: " <> show (length model.modelCards)]
+          [ HE.text $ 
+              "Score: " <> show (length model.modelCards) <>
+              " | Best: " <> show model.modelBestScore
+          ]
       , HE.h2
           [ HA.style1 "text-align" "center" 
           , HA.style1 "user-select" "none"
           , HA.style1 "font-size" "32pt"
           ]
           [ HE.text $ renderLives model.modelLives ]
-      , HE.div_ [ card model model.modelCurrentCard false Nothing ]
+      , HE.div_ 
+          [ if model.modelLives > 0
+              then card model model.modelCurrentCard false Nothing 
+              else gameOverPopup
+          ]
+      ]
+  , HE.hr
+  , HE.div
+      (cardCapStyle <> [HA.style1 "border-radius" "20px 20px 0px 0px"])
+      [ HE.text $ 
+          case model.modelCardsOrder of 
+            Ascending -> "smaller" 
+            Descending -> "bigger"
       ]
   , HE.div
       [ HA.style1 "overflow-y" "scroll"
+      , HA.style1 "overflow-x" "visible"
       , HA.style1 "max-height" "50%"
+      --, HA.style1 "width" "50%"
+      , HA.style1 "margin" "0 auto"
       ] $
+      [
+      ] <>
       foldrWithIndex 
         (\idx (Tuple d corr) arr -> card model d corr (Just $ intToNat idx) : arr) 
         mempty
-        (reverse model.modelCards)
-  ] <> maybe [] singleton (gameOverPopup model)
+        (case model.modelCardsOrder of
+           Descending -> model.modelCards
+           Ascending -> reverse model.modelCards
+        )
+  , HE.div
+      ( cardCapStyle <> 
+          [ HA.style1 "border-radius" "0px 0px 20px 20px"
+          , HA.style1 "margin-top" $ case model.modelDragState of
+              Just {dragOverIdx: Just idx}
+              | idx == intToNat (length model.modelCards) -> "48pt"
+              _ -> "0"
+          ]
+      )
+      [ HE.text $ case model.modelCardsOrder of
+                    Ascending -> "bigger" 
+                    Descending -> "smaller"
+      ]
+  ]
 
 -- | Events that come from outside the `view`
 subscribe :: Array (Subscription Message)
@@ -357,6 +431,8 @@ subscribe = []
 
 setupGame :: Aff Model
 setupGame = do
+  -- TODO cache the deck so we don't have to fetch it every time the game is
+  -- restarted
   {json} <- fetch 
     "http://localhost:8000/data/output.json"
     { headers: { "Accept": "application/json" }}
