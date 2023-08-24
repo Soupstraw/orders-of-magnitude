@@ -22,6 +22,8 @@
                      "flame"
                      "undefined"
                      "web-uievents"
+                     "web-html"
+                     "web-cssom-view"
                      "debug"
                      "profunctor-lenses"
                      "fetch"
@@ -51,7 +53,7 @@
 
                  shellHook =
                    ''
-                   alias watch="find src | entr -s 'echo bundling; purs-nix bundle && bash scripts/fixup'"
+                   alias watch="find src | entr -s 'echo bundling; purs-nix bundle'"
                    '';
                };
          }

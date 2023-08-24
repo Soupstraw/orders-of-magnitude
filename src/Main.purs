@@ -2,39 +2,43 @@ module Main where
 
 import Prelude
 
-import Control.Alternative ((<|>))
 import Control.Monad.Error.Class (throwError)
 import Control.Monad.Gen.Trans (evalGen, shuffle)
-import Control.Monad.Maybe.Trans (runMaybeT)
-import Data.Array (drop, index, insertBy, length, reverse, singleton, take, (:))
+import Data.Array (drop, index, insertBy, length, reverse, take, (:))
 import Data.Array.NonEmpty (fromArray, head, tail)
-import Data.Array.NonEmpty.Internal (NonEmptyArray)
 import Data.Either (Either(..))
-import Data.Enum (pred, succ)
+import Data.Enum (succ)
 import Data.FoldableWithIndex (foldrWithIndex)
-import Data.Lens (_Just, is, (.~))
+import Data.Int (toNumber)
+import Data.Lens (_Just, (.~))
 import Data.Lens.Record (prop)
-import Data.Maybe (Maybe(..), fromMaybe, maybe)
+import Data.Maybe (Maybe(..), maybe)
 import Data.Natural (Natural, intToNat, natToInt)
 import Data.Number (infinity)
 import Data.Tuple (Tuple(..), fst)
-import Debug (trace, traceM)
+import Debug (trace)
 import Effect (Effect)
 import Effect.Aff (Aff, error, launchAff_)
 import Effect.Class (liftEffect)
-import Effect.Console (log)
 import Fetch (fetch)
 import Flame (Html, QuerySelector(..), Subscription)
 import Flame.Application.EffectList as FAN
 import Flame.Html.Attribute as HA
 import Flame.Html.Element as HE
 import Flame.Types (NodeData)
+import OrderTheMagnitudes.Foreign (scrollBy)
 import Random.LCG (randomSeed)
 import Simple.JSON as JSON
 import Type.Proxy (Proxy(..))
-import Undefined (undefined)
+import Web.CSSOMView.HTMLElement (offsetHeight)
+import Web.DOM.Document (toNonElementParentNode)
+import Web.DOM.Element (getBoundingClientRect)
+import Web.DOM.NonElementParentNode (getElementById)
 import Web.Event.Event (Event)
-import Web.HTML.HTMLElement (offsetHeight)
+import Web.HTML (window)
+import Web.HTML.HTMLDocument (toDocument)
+import Web.HTML.Window (document)
+import Web.UIEvent.MouseEvent (clientY)
 import Web.UIEvent.MouseEvent as MouseEvent
 
 class Measure :: forall k. k -> Constraint
@@ -63,6 +67,7 @@ data Message
   = StartDragging
   | StopDragging
   | MouseMove Event
+  | MouseMoveCardStack Event
   | MouseOver (Maybe Natural)
   | RestartGame
   | GameReady Model
@@ -224,6 +229,34 @@ update oldModel (GameReady freshModel) = Tuple newModel []
             oldModel.modelBestScore 
             (length oldModel.modelCards)
       }
+update model (MouseMoveCardStack ev) = 
+  case model.modelDragState of
+    Nothing -> Tuple model []
+    Just _ -> Tuple model [ Just <$> scrollCards ev ]
+
+scrollMargin = 50.0
+
+scrollCards :: Event -> Aff Message
+scrollCards ev = case MouseEvent.fromEvent ev of
+  Just mouseEv -> do
+    win <- liftEffect window
+    doc <- liftEffect $ toDocument <$> document win
+    cardsBox <- liftEffect 
+      <<< getElementById "cardsBox" 
+      $ toNonElementParentNode doc
+    case cardsBox of
+      Just elem -> do
+         {top, bottom} <- liftEffect $ getBoundingClientRect elem
+         let mouseY = toNumber $ clientY mouseEv
+         let scrollAmt
+               | bottom - scrollMargin < mouseY = 10.0
+               | between (top - scrollMargin) (top + scrollMargin) mouseY = -10.0
+               | otherwise = 0.0
+         liftEffect $ scrollBy scrollAmt elem
+      Nothing -> do
+         pure unit
+    pure $ MouseMove ev
+  Nothing -> pure $ MouseMove ev
 
 card :: Model -> Card -> Boolean -> Maybe Natural -> Html Message
 card model c correct mbyIdx = 
@@ -388,40 +421,49 @@ view model = HE.main
       ]
   , HE.hr
   , HE.div
-      (cardCapStyle <> [HA.style1 "border-radius" "20px 20px 0px 0px"])
-      [ HE.text $ 
-          case model.modelCardsOrder of 
-            Ascending -> "smaller" 
-            Descending -> "bigger"
-      ]
-  , HE.div
-      [ HA.style1 "overflow-y" "scroll"
-      , HA.style1 "overflow-x" "visible"
-      , HA.style1 "max-height" "50%"
-      --, HA.style1 "width" "50%"
+      [ HA.onMousemove' $ MouseMoveCardStack
       , HA.style1 "margin" "0 auto"
-      ] $
-      [
-      ] <>
-      foldrWithIndex 
-        (\idx (Tuple d corr) arr -> card model d corr (Just $ intToNat idx) : arr) 
-        mempty
-        (case model.modelCardsOrder of
-           Descending -> model.modelCards
-           Ascending -> reverse model.modelCards
-        )
-  , HE.div
-      ( cardCapStyle <> 
-          [ HA.style1 "border-radius" "0px 0px 20px 20px"
-          , HA.style1 "margin-top" $ case model.modelDragState of
-              Just {dragOverIdx: Just idx}
-              | idx == intToNat (length model.modelCards) -> "48pt"
-              _ -> "0"
+      , HA.style1 "height" "50%"
+      ]
+      [ HE.div
+          (cardCapStyle <> [HA.style1 "border-radius" "20px 20px 0px 0px"])
+          [ HE.text $ 
+              case model.modelCardsOrder of 
+                Ascending -> "smaller" 
+                Descending -> "bigger"
           ]
-      )
-      [ HE.text $ case model.modelCardsOrder of
-                    Ascending -> "bigger" 
-                    Descending -> "smaller"
+      , HE.div
+          [ HA.style1 "overflow-y" "scroll"
+          , HA.style1 "overflow-x" "visible"
+          , HA.style1 "margin" "0 auto"
+          , HA.id "cardsBox"
+          ] $
+          foldrWithIndex 
+            (\idx (Tuple d corr) arr -> card model d corr (Just $ intToNat idx) : arr) 
+            mempty
+            (case model.modelCardsOrder of
+               Descending -> model.modelCards
+               Ascending -> reverse model.modelCards
+            ) <>
+          [ HE.div
+              [ HA.style1 "margin-top" case model.modelDragState of
+                  Just {dragOverIdx} 
+                    | map natToInt dragOverIdx 
+                        == Just (length model.modelCards) -> "48pt"
+                  _ -> "0"
+              ]
+              [ HE.text ""
+              ]
+          ]
+      , HE.div
+          ( cardCapStyle <> 
+              [ HA.style1 "border-radius" "0px 0px 20px 20px"
+              ]
+          )
+          [ HE.text $ case model.modelCardsOrder of
+                        Ascending -> "bigger" 
+                        Descending -> "smaller"
+          ]
       ]
   ]
 
