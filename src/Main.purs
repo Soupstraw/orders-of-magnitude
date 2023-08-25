@@ -408,6 +408,7 @@ view model = HE.main
           , HA.style1 "overflow-x" "visible"
           , HA.style1 "margin" "0 auto"
           , HA.id "cardsBox"
+          , HA.class' "hide-scrollbar"
           ] $
           foldrWithIndex 
             (\idx (Tuple d corr) arr -> card model d corr (Just $ intToNat idx) : arr) 
