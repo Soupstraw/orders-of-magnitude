@@ -249,8 +249,10 @@ scrollCards ev = case MouseEvent.fromEvent ev of
          {top, bottom} <- liftEffect $ getBoundingClientRect elem
          let mouseY = toNumber $ clientY mouseEv
          let scrollAmt
-               | bottom - scrollMargin < mouseY = 10.0
-               | between (top - scrollMargin) (top + scrollMargin) mouseY = -10.0
+               | bottom - scrollMargin < mouseY = 
+                   10.0 * (mouseY - bottom + scrollMargin) / scrollMargin
+               | between (top - scrollMargin) (top + scrollMargin) mouseY = 
+                   -10.0 * (top + scrollMargin - mouseY) / (2.0 * scrollMargin)
                | otherwise = 0.0
          liftEffect $ scrollBy scrollAmt elem
       Nothing -> do
@@ -380,15 +382,13 @@ cardCapStyle =
 view :: Model -> Html Message
 view model = HE.main 
   [ HA.style1 "position" "fixed"
-  , HA.style1 "top" "0px"
-  , HA.style1 "bottom" "0px"
-  , HA.style1 "left" "0px"
-  , HA.style1 "right" "0px"
+  , HA.style1 "inset" "0px"
   , HA.style1 "background-color" "#282828"
   , HA.onMousemove' MouseMove
   , HA.onMouseup StopDragging
   , HA.style1 "display" "flex"
   , HA.style1 "flex-direction" "column"
+  , HA.style1 "height" "100vh"
   ] $
   [ HE.div
       [ HA.onMouseover $ MouseOver Nothing
@@ -424,6 +424,8 @@ view model = HE.main
       [ HA.onMousemove' $ MouseMoveCardStack
       , HA.style1 "margin" "0 auto"
       , HA.style1 "height" "50%"
+      , HA.style1 "display" "flex"
+      , HA.style1 "flex-direction" "column"
       ]
       [ HE.div
           (cardCapStyle <> [HA.style1 "border-radius" "20px 20px 0px 0px"])
