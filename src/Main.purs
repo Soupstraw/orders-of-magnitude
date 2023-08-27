@@ -448,7 +448,7 @@ setupGame = do
   -- TODO cache the deck so we don't have to fetch it every time the game is
   -- restarted
   {json} <- fetch 
-    "http://localhost:8000/data/output.json"
+    "/data/output.json"
     { headers: { "Accept": "application/json" }}
 
   gameDataJson <- json

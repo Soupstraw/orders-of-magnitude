@@ -36,7 +36,21 @@
                  dir = ./.;
                };
          in
-         { packages.default = ps.bundle {};
+         { packages = rec {
+             default = pkgs.stdenv.mkDerivation {
+               name = "order-the-magnitudes";
+               buildInputs = [];
+               src = ./.;
+               installPhase = ''
+                 mkdir $out
+                 cp ${bundle} $out/main.js
+                 cp index.html $out/
+                 cp style.css $out/
+                 cp -r data $out/
+               '';
+             };
+             bundle = ps.bundle {};
+           };
 
            devShells.default =
              pkgs.mkShell
