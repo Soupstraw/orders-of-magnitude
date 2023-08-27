@@ -4,7 +4,7 @@ import Prelude
 
 import Control.Monad.Error.Class (throwError)
 import Control.Monad.Gen.Trans (evalGen, shuffle)
-import Data.Array (drop, index, insertBy, length, reverse, take, (:))
+import Data.Array (drop, filter, index, insertBy, length, reverse, take, (:))
 import Data.Array.NonEmpty (fromArray, head, tail)
 import Data.Either (Either(..))
 import Data.Enum (succ)
@@ -15,7 +15,7 @@ import Data.Lens.Record (prop)
 import Data.Maybe (Maybe(..), maybe)
 import Data.Natural (Natural, intToNat, natToInt)
 import Data.Number (infinity)
-import Data.Tuple (Tuple(..), fst)
+import Data.Tuple (Tuple(..), fst, snd)
 import Debug (trace)
 import Effect (Effect)
 import Effect.Aff (Aff, error, launchAff_)
@@ -61,6 +61,7 @@ type Model =
   , modelLives :: Int
   , modelBestScore :: Int
   , modelCardsOrder :: CardsOrder
+  , modelShowTutorial :: Boolean
   }
 
 -- | Data type used to represent events
@@ -72,6 +73,7 @@ data Message
   | MouseOver (Maybe Natural)
   | RestartGame
   | GameReady Model
+  | CloseTutorial
   | NoOp
 
 data CardsOrder
@@ -92,6 +94,9 @@ instance Semiring Pos where
 instance Ring Pos where
   sub (Pos x1 y1) (Pos x2 y2) = Pos (sub x1 x2) (sub y1 y2)
 
+countPoints :: Model -> Int
+countPoints model = length (filter snd model.modelCards) - 1
+
 -- | Initial state of the app
 initModel :: Card -> Card -> Array Card -> Model
 initModel curCard placedCard deck =
@@ -103,6 +108,7 @@ initModel curCard placedCard deck =
   , modelLives: totalLives
   , modelBestScore: 0
   , modelCardsOrder: Descending
+  , modelShowTutorial: true
   }
 
 -- | `update` is called to handle events
@@ -195,12 +201,14 @@ update oldModel (GameReady freshModel) = Tuple newModel []
       { modelBestScore = 
           max 
             oldModel.modelBestScore 
-            (length oldModel.modelCards)
+            (countPoints oldModel)
+      , modelShowTutorial = false
       }
 update model (MouseMoveCardStack ev) = 
   case model.modelDragState of
     Nothing -> Tuple model []
     Just _ -> Tuple model [ Just <$> scrollCards ev ]
+update model CloseTutorial = Tuple (model {modelShowTutorial = false}) []
 
 scrollMargin :: Number
 scrollMargin = 50.0
@@ -278,7 +286,7 @@ card model c correct mbyIdx =
               _ -> NoOp
           , HA.style1 "background-color" $ 
               if correct
-                then "#b8bb26"
+                then "#83a598"
                 else "#cc241d"
           ]
         Nothing ->
@@ -323,10 +331,51 @@ gameOverPopup = HE.div
             , HA.style1 "width" "25%"
             , HA.style1 "height" "42pt"
             , HA.style1 "margin" "0 auto"
-            , HA.style1 "padding-bottom" "10px"
+            , HA.style1 "margin-bottom" "15px"
+            , HA.style1 "padding" "10px"
             ]
             "New game"
         ]
+
+tutorialPopup :: Html Message
+tutorialPopup = HE.div
+  [ HA.style1 "position" "fixed"
+  , HA.style1 "inset" "0"
+  , HA.style1 "background-color" "#00000055"
+  , HA.style1 "display" "flex"
+  , HA.style1 "justify-content" "center"
+  , HA.style1 "align-items" "center"
+  ]
+  [ HE.div
+      [ HA.style1 "display" "flex"
+      , HA.style1 "flex-direction" "column"
+      , HA.style1 "background-color" "#282828"
+      , HA.style1 "height" "50vh"
+      , HA.style1 "width" "50vw"
+      , HA.style1 "border-radius" "20px"
+      , HA.style1 "padding" "15pt"
+      ]
+      [ HE.h1 
+          [ HA.style1 "text-align" "center"
+          , HA.style1 "color" "#ebdbb2"
+          ] 
+          [HE.text "Order the magnitudes"]
+      , HE.div 
+          [ HA.style1 "flex" "1 0 auto"
+          , HA.style1 "color" "#ebdbb2"
+          , HA.style1 "font-size" "18pt"
+          ] 
+        [ HE.p_ "Drag the card at the top of the screen into the correct spot in the list. The cards should be placed in order from largest value to the smallest value (top to bottom)."
+          , HE.p_ "If you place the card in the correct spot it will turn blue, otherwise it will turn red and you will lose a life."
+          , HE.p_ "You have three lives and each correctly placed card gives you a point. Try to get as many points as possible before you run out of lives."
+          ]
+      , HE.button 
+          [ HA.onClick CloseTutorial
+          , HA.style1 "width" "40%"
+          , HA.style1 "margin" "0 auto"
+          ] "Play"
+      ]
+  ]
 
 cardCapStyle :: Array (NodeData Message)
 cardCapStyle =
@@ -359,7 +408,7 @@ view model = HE.main
   , HA.style1 "flex-direction" "column"
   , HA.style1 "height" "100vh"
   ] $
-  [ HE.div
+  ([ HE.div
       [ HA.onMouseover $ MouseOver Nothing
       ]
       --[ HE.h1
@@ -373,7 +422,7 @@ view model = HE.main
           , HA.style1 "font-size" "16pt"
           ]
           [ HE.text $ 
-              "Score: " <> show (length model.modelCards) <>
+              "Score: " <> show (countPoints model) <>
               " | Best: " <> show model.modelBestScore
           ]
       , HE.h2
@@ -437,7 +486,10 @@ view model = HE.main
                         Descending -> "smaller"
           ]
       ]
-  ]
+  ] <> if model.modelShowTutorial
+         then [tutorialPopup]
+         else []
+  )
 
 -- | Events that come from outside the `view`
 subscribe :: Array (Subscription Message)
