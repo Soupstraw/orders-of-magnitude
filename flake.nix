@@ -24,6 +24,7 @@
                      "web-uievents"
                      "web-html"
                      "web-cssom-view"
+                     "web-pointerevents"
                      "debug"
                      "profunctor-lenses"
                      "fetch"

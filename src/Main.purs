@@ -2,6 +2,7 @@ module Main where
 
 import Prelude
 
+import Control.Alternative (guard)
 import Control.Monad.Error.Class (throwError)
 import Control.Monad.Gen.Trans (evalGen, shuffle)
 import Data.Array (drop, filter, index, insertBy, length, reverse, take, (:))
@@ -12,11 +13,10 @@ import Data.FoldableWithIndex (foldrWithIndex)
 import Data.Int (toNumber)
 import Data.Lens (_Just, (.~))
 import Data.Lens.Record (prop)
-import Data.Maybe (Maybe(..), maybe)
+import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Natural (Natural, intToNat, natToInt)
 import Data.Number (infinity)
 import Data.Tuple (Tuple(..), fst, snd)
-import Debug (trace)
 import Effect (Effect)
 import Effect.Aff (Aff, error, launchAff_)
 import Effect.Class (liftEffect)
@@ -31,7 +31,6 @@ import OrderTheMagnitudes.Foreign (scrollBy)
 import Random.LCG (randomSeed)
 import Simple.JSON as JSON
 import Type.Proxy (Proxy(..))
-import Web.CSSOMView.HTMLElement (offsetHeight)
 import Web.DOM.Document (toNonElementParentNode)
 import Web.DOM.Element (getBoundingClientRect)
 import Web.DOM.NonElementParentNode (getElementById)
@@ -39,6 +38,7 @@ import Web.Event.Event (Event)
 import Web.HTML (window)
 import Web.HTML.HTMLDocument (toDocument)
 import Web.HTML.Window (document)
+import Web.PointerEvent.PointerEvent as PointerEvent
 import Web.UIEvent.MouseEvent (clientY)
 import Web.UIEvent.MouseEvent as MouseEvent
 
@@ -66,7 +66,7 @@ type Model =
 
 -- | Data type used to represent events
 data Message 
-  = StartDragging
+  = StartDragging Event
   | StopDragging
   | MouseMove Event
   | MouseMoveCardStack Event
@@ -111,14 +111,27 @@ initModel curCard placedCard deck =
   , modelShowTutorial: true
   }
 
+updateMousePos :: Event -> Model -> Model
+updateMousePos event model = fromMaybe model $
+  do
+      pointerEvent <- PointerEvent.fromEvent event
+      guard $ PointerEvent.isPrimary pointerEvent
+      let mouseEvent = PointerEvent.toMouseEvent pointerEvent
+      pure $ model
+        { modelMousePos = Pos
+            (MouseEvent.clientX mouseEvent)
+            (MouseEvent.clientY mouseEvent)
+        }
+
 -- | `update` is called to handle events
 update :: Model -> Message -> Tuple Model (Array (Aff (Maybe Message)))
 update model NoOp = Tuple model []
-update model StartDragging = Tuple newModel []
+update model (StartDragging event) = Tuple newModel []
   where
-    newModel = model
+    newMousePos = updateMousePos event model
+    newModel = newMousePos
       { modelDragState = Just 
-          { dragStartPos: model.modelMousePos
+          { dragStartPos: newMousePos.modelMousePos
           , dragOverIdx: Nothing
           }
       }
@@ -130,14 +143,13 @@ update model StopDragging =
           Just {dragOverIdx: Just idx'} -> 
             case fromArray model.modelDeck of
               Just nonEmptyDeck -> 
-                trace ("idx: " <> show idx) $ \_ ->
-                  model
-                    { modelDragState = Nothing
-                    , modelCards = newModelCards
-                    , modelLives = model.modelLives - if correct then 0 else 1
-                    , modelCurrentCard = head nonEmptyDeck
-                    , modelDeck = tail nonEmptyDeck
-                    }
+                model
+                  { modelDragState = Nothing
+                  , modelCards = newModelCards
+                  , modelLives = model.modelLives - if correct then 0 else 1
+                  , modelCurrentCard = head nonEmptyDeck
+                  , modelDeck = tail nonEmptyDeck
+                  }
               Nothing -> model
               where
                 idx = case model.modelCardsOrder of
@@ -173,18 +185,7 @@ update model StopDragging =
           _ -> model
                  { modelDragState = Nothing
                  }
-update model (MouseMove event) = Tuple newModel []
-  where
-    newModel = 
-      maybe 
-        model 
-        (\mouseEvent -> model
-          { modelMousePos = Pos 
-            (MouseEvent.clientX mouseEvent) 
-            (MouseEvent.clientY mouseEvent)
-          }
-        )
-        (MouseEvent.fromEvent event)
+update model (MouseMove event) = Tuple (updateMousePos event model) []
 update model (MouseOver mbyIdx) = Tuple newModel []
   where
     newModel = model 
@@ -214,8 +215,9 @@ scrollMargin :: Number
 scrollMargin = 50.0
 
 scrollCards :: Event -> Aff Message
-scrollCards ev = case MouseEvent.fromEvent ev of
-  Just mouseEv -> do
+scrollCards ev = case PointerEvent.fromEvent ev of
+  Just pointerEvent | PointerEvent.isPrimary pointerEvent -> do
+    let mouseEv = PointerEvent.toMouseEvent pointerEvent
     win <- liftEffect window
     doc <- liftEffect $ toDocument <$> document win
     cardsBox <- liftEffect 
@@ -235,7 +237,7 @@ scrollCards ev = case MouseEvent.fromEvent ev of
       Nothing -> do
          pure unit
     pure $ MouseMove ev
-  Nothing -> pure $ MouseMove ev
+  _ -> pure $ MouseMove ev
 
 card :: Model -> Card -> Boolean -> Maybe Natural -> Html Message
 card model c correct mbyIdx = 
@@ -278,7 +280,7 @@ card model c correct mbyIdx =
     placedAttrs = 
       case mbyIdx of
         Just idx ->
-          [ HA.onMouseover $ case model.modelDragState of
+          [ HA.createEvent "pointerover" case model.modelDragState of
               Just {dragOverIdx: Just dragIdx} 
                 | dragIdx == idx -> MouseOver $ succ idx
                 | otherwise -> MouseOver $ Just idx
@@ -290,7 +292,7 @@ card model c correct mbyIdx =
                 else "#cc241d"
           ]
         Nothing ->
-          [ HA.onMousedown StartDragging
+          [ HA.createRawEvent "pointerdown" $ pure <<< Just <<< StartDragging
           , HA.style1 "cursor" "grab"
           , HA.style1 "background-color" "#ebdbb2"
           ] <> posAttr
@@ -300,7 +302,7 @@ card model c correct mbyIdx =
       ] <>
       case mbyIdx of
         Just idx ->
-          [ HA.onMouseover (MouseOver $ Just idx) 
+          [ HA.createEvent "pointerover" $ MouseOver (Just idx)
           ] <> case model.modelDragState of
             Just {dragOverIdx: Just dragIdx}
               | idx == dragIdx -> 
@@ -402,14 +404,14 @@ view model = HE.main
   [ HA.style1 "position" "fixed"
   , HA.style1 "inset" "0px"
   , HA.style1 "background-color" "#282828"
-  , HA.onMousemove' MouseMove
-  , HA.onMouseup StopDragging
+  , HA.createRawEvent "pointermove" $ pure <<< Just <<< MouseMove
+  , HA.createEvent "pointerup" StopDragging
   , HA.style1 "display" "flex"
   , HA.style1 "flex-direction" "column"
   , HA.style1 "height" "100vh"
   ] $
   ([ HE.div
-      [ HA.onMouseover $ MouseOver Nothing
+      [ HA.createEvent "pointerover" $ MouseOver Nothing
       ]
       --[ HE.h1
       --    [ HA.style1 "text-align" "center" 
@@ -439,7 +441,7 @@ view model = HE.main
       ]
   , HE.hr
   , HE.div
-      [ HA.onMousemove' $ MouseMoveCardStack
+      [ HA.createRawEvent "pointermove" $ pure <<< Just <<< MouseMoveCardStack
       , HA.style1 "margin" "0 auto"
       , HA.style1 "height" "50%"
       , HA.style1 "display" "flex"
