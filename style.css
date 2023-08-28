@@ -1,9 +1,12 @@
 h1 {
   font-family: 'Libre Franklin', sans-serif;
+  text-align: center;
+  color: #ebdbb2;
 }
 
 div {
   font-family: 'Libre Franklin', sans-serif;
+  color: #ebdbb2;
 }
 
 button {

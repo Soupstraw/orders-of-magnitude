@@ -14,8 +14,8 @@ import Data.Int (toNumber)
 import Data.Lens (_Just, (.~))
 import Data.Lens.Record (prop)
 import Data.Maybe (Maybe(..), fromMaybe, maybe)
-import Data.Natural (Natural, intToNat, natToInt)
 import Data.Number (infinity)
+import Data.Number.Format (exponential, toStringWith)
 import Data.Tuple (Tuple(..), fst, snd)
 import Effect (Effect)
 import Effect.Aff (Aff, error, launchAff_)
@@ -31,13 +31,17 @@ import OrderTheMagnitudes.Foreign (scrollBy)
 import Random.LCG (randomSeed)
 import Simple.JSON as JSON
 import Type.Proxy (Proxy(..))
-import Web.DOM.Document (toNonElementParentNode)
+import Undefined (undefined)
+import Web.CSSOMView.HTMLElement (offsetHeight)
+import Web.DOM.Document (doctype, toNonElementParentNode)
 import Web.DOM.Element (getBoundingClientRect)
+import Web.DOM.Element as Element
 import Web.DOM.NonElementParentNode (getElementById)
-import Web.Event.Event (Event)
+import Web.Event.Event (Event, target)
 import Web.HTML (window)
 import Web.HTML.HTMLDocument (toDocument)
 import Web.HTML.Window (document)
+import Web.PointerEvent.Element (releasePointerCapture)
 import Web.PointerEvent.PointerEvent as PointerEvent
 import Web.UIEvent.MouseEvent (clientY)
 import Web.UIEvent.MouseEvent as MouseEvent
@@ -48,7 +52,7 @@ class Measure a where
 
 type DragState =
   { dragStartPos :: Pos
-  , dragOverIdx :: Maybe Natural
+  , dragOverIdx :: Maybe Int
   }
 
 -- | The model represents the state of the app
@@ -62,6 +66,8 @@ type Model =
   , modelBestScore :: Int
   , modelCardsOrder :: CardsOrder
   , modelShowTutorial :: Boolean
+  , modelShowSettings :: Boolean
+  , modelNotation :: Notation
   }
 
 -- | Data type used to represent events
@@ -70,15 +76,21 @@ data Message
   | StopDragging
   | MouseMove Event
   | MouseMoveCardStack Event
-  | MouseOver (Maybe Natural)
+  | MouseOver (Maybe Int)
   | RestartGame
   | GameReady Model
-  | CloseTutorial
+  | TutorialVisibility Boolean
+  | SettingsVisibility Boolean
+  | PickNotation Notation
   | NoOp
 
 data CardsOrder
   = Ascending
   | Descending
+
+data Notation
+  = Greek
+  | Scientific
 
 data Pos = Pos Int Int
 
@@ -109,6 +121,8 @@ initModel curCard placedCard deck =
   , modelBestScore: 0
   , modelCardsOrder: Descending
   , modelShowTutorial: true
+  , modelShowSettings: false
+  , modelNotation: Scientific
   }
 
 updateMousePos :: Event -> Model -> Model
@@ -126,7 +140,18 @@ updateMousePos event model = fromMaybe model $
 -- | `update` is called to handle events
 update :: Model -> Message -> Tuple Model (Array (Aff (Maybe Message)))
 update model NoOp = Tuple model []
-update model (StartDragging event) = Tuple newModel []
+update model (StartDragging event) = Tuple newModel 
+  [ -- TODO can we make touch work in this hacky way?
+    -- runMaybeT $ do 
+    --   pointerEvent <- lift $ PointerEvent.fromEvent event
+    --   let mouseEvent = PointerEvent.toMouseEvent pointerEvent
+    --   tgt <- lift $ target event
+    --   targetElem <- lift $ Element.fromEventTarget tgt
+    --   liftEffect $ releasePointerCapture 
+    --     (PointerEvent.pointerId pointerEvent) 
+    --     targetElem
+    --   empty
+  ]
   where
     newMousePos = updateMousePos event model
     newModel = newMousePos
@@ -153,8 +178,8 @@ update model StopDragging =
               Nothing -> model
               where
                 idx = case model.modelCardsOrder of
-                        Ascending -> natToInt idx'
-                        Descending -> length model.modelCards - natToInt idx'
+                        Ascending -> idx'
+                        Descending -> length model.modelCards - idx'
                 getCard i = fst <$> index (reverse model.modelCards) i
                 prevCard = 
                   maybe 
@@ -209,7 +234,9 @@ update model (MouseMoveCardStack ev) =
   case model.modelDragState of
     Nothing -> Tuple model []
     Just _ -> Tuple model [ Just <$> scrollCards ev ]
-update model CloseTutorial = Tuple (model {modelShowTutorial = false}) []
+update model (TutorialVisibility visible) = Tuple (model {modelShowTutorial = visible}) []
+update model (SettingsVisibility visible) = Tuple (model {modelShowSettings = visible}) []
+update model (PickNotation notation) = Tuple (model {modelNotation = notation}) []
 
 scrollMargin :: Number
 scrollMargin = 50.0
@@ -239,7 +266,7 @@ scrollCards ev = case PointerEvent.fromEvent ev of
     pure $ MouseMove ev
   _ -> pure $ MouseMove ev
 
-card :: Model -> Card -> Boolean -> Maybe Natural -> Html Message
+card :: Model -> Card -> Boolean -> Maybe Int -> Html Message
 card model c correct mbyIdx = 
     HE.div 
       cardOuterStyle
@@ -264,7 +291,11 @@ card model c correct mbyIdx =
       ]
   where
     magText = case mbyIdx of
-      Just _ -> show c.cardMagnitude <> " " <> c.cardUnit
+      Just _ -> case model.modelNotation of
+                  Greek -> show c.cardMagnitude <> " " <> c.cardUnit
+                  Scientific -> toStringWith 
+                    (exponential 2) 
+                    (cardUnitlessValue c) <> " m"
       Nothing -> "?"
     posAttr =  case model.modelDragState of
       Just {dragStartPos} ->
@@ -295,6 +326,7 @@ card model c correct mbyIdx =
           [ HA.createRawEvent "pointerdown" $ pure <<< Just <<< StartDragging
           , HA.style1 "cursor" "grab"
           , HA.style1 "background-color" "#ebdbb2"
+          , HA.style1 "touch-action" "none"
           ] <> posAttr
     cardOuterStyle = 
       [ HA.style1 "width" "100%"
@@ -339,8 +371,8 @@ gameOverPopup = HE.div
             "New game"
         ]
 
-tutorialPopup :: Html Message
-tutorialPopup = HE.div
+popup :: (Boolean -> Message) -> Array (Html Message) -> Html Message
+popup msg content = HE.div
   [ HA.style1 "position" "fixed"
   , HA.style1 "inset" "0"
   , HA.style1 "background-color" "#00000055"
@@ -357,27 +389,59 @@ tutorialPopup = HE.div
       , HA.style1 "border-radius" "20px"
       , HA.style1 "padding" "15pt"
       ]
-      [ HE.h1 
-          [ HA.style1 "text-align" "center"
-          , HA.style1 "color" "#ebdbb2"
-          ] 
-          [HE.text "Order the magnitudes"]
-      , HE.div 
-          [ HA.style1 "flex" "1 0 auto"
-          , HA.style1 "color" "#ebdbb2"
-          , HA.style1 "font-size" "18pt"
-          ] 
-        [ HE.p_ "Drag the card at the top of the screen into the correct spot in the list. The cards should be placed in order from largest value to the smallest value (top to bottom)."
-          , HE.p_ "If you place the card in the correct spot it will turn blue, otherwise it will turn red and you will lose a life."
-          , HE.p_ "You have three lives and each correctly placed card gives you a point. Try to get as many points as possible before you run out of lives."
+      ( content
+        <> [ HE.button
+               [ HA.onClick $ msg false
+               , HA.style1 "position" "absolute"
+               , HA.style1 "top" "10px"
+               , HA.style1 "right" "10px"
+               ]
+               "❌"
+           ]
+       )
+  ]
+
+tutorialPopup :: Html Message
+tutorialPopup = popup TutorialVisibility
+  [ HE.h1_
+      ["Order the magnitudes"]
+  , HE.div 
+      [ HA.style1 "flex" "1 0 auto"
+      , HA.style1 "color" "#ebdbb2"
+      , HA.style1 "font-size" "18pt"
+      ] 
+    [ HE.p_ "Drag the card at the top of the screen into the correct spot in the list. The cards should be placed in order from largest value to the smallest value (top to bottom)."
+      , HE.p_ "If you place the card in the correct spot it will turn blue, otherwise it will turn red and you will lose a life."
+      , HE.p_ "You have three lives and each correctly placed card gives you a point. Try to get as many points as possible before you run out of lives."
+      ]
+  , HE.button 
+      [ HA.onClick (TutorialVisibility false)
+      , HA.style1 "width" "40%"
+      , HA.style1 "margin" "0 auto"
+      ] "Play"
+  ]
+
+settingsPopup :: Html Message
+settingsPopup = popup SettingsVisibility
+  [ HE.h1_ ["Settings"]
+  , HE.div
+      [ HA.style1 "display" "grid"
+      , HA.style1 "grid-auto-flow" "column"
+      , HA.style1 "grid-template-columns" "10% 40%"
+      ]
+      [ HE.text "Notation"
+      , HE.select
+          [ HA.onSelect (PickNotation <<< parseNotation)
           ]
-      , HE.button 
-          [ HA.onClick CloseTutorial
-          , HA.style1 "width" "40%"
-          , HA.style1 "margin" "0 auto"
-          ] "Play"
+          [ HE.option_ "Scientific"
+          , HE.option_ "Greek"
+          ]
       ]
   ]
+  where
+    parseNotation "Scientific" = Scientific
+    parseNotation "Greek" = Greek
+    parseNotation _ = Greek
 
 cardCapStyle :: Array (NodeData Message)
 cardCapStyle =
@@ -396,6 +460,7 @@ cardCapStyle =
   , HA.style1 "margin-right" "auto"
   , HA.style1 "box-shadow" "3px 3px 2px 1px rgba(0, 0, 128, .2)"
   , HA.style1 "background-color" "#928374"
+  , HA.style1 "touch-action" "none"
   ]
 
 -- | `view` is called whenever the model is updated
@@ -462,7 +527,7 @@ view model = HE.main
           , HA.class' "hide-scrollbar"
           ] $
           foldrWithIndex 
-            (\idx (Tuple d corr) arr -> card model d corr (Just $ intToNat idx) : arr) 
+            (\idx (Tuple d corr) arr -> card model d corr (Just idx) : arr) 
             mempty
             (case model.modelCardsOrder of
                Descending -> model.modelCards
@@ -471,7 +536,7 @@ view model = HE.main
           [ HE.div
               [ HA.style1 "margin-top" case model.modelDragState of
                   Just {dragOverIdx} 
-                    | map natToInt dragOverIdx 
+                    | dragOverIdx 
                         == Just (length model.modelCards) -> "48pt"
                   _ -> "0"
               ]
@@ -488,8 +553,17 @@ view model = HE.main
                         Descending -> "smaller"
           ]
       ]
+  , HE.button
+      [ HA.style1 "position" "fixed"
+      , HA.style1 "margin" "10px"
+      , HA.onClick $ SettingsVisibility true
+      ]
+      "⚙️"
   ] <> if model.modelShowTutorial
          then [tutorialPopup]
+         else []
+    <> if model.modelShowSettings
+         then [settingsPopup]
          else []
   )
 

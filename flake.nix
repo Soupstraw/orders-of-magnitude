@@ -31,7 +31,8 @@
                      "arrays"
                      "simple-json"
                      "generate-values"
-                     "naturals"
+                     "numbers"
+                     "exists"
                    ];
 
                  dir = ./.;
